@@ -3,7 +3,24 @@ import os
 import pytest
 import pytest_asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+# Create mock redis early and patch the module before other modules import it
+mock_redis_instance = AsyncMock()
+mock_redis_instance.get = AsyncMock(return_value=None)
+mock_redis_instance.set = AsyncMock()
+mock_redis_instance.incr = AsyncMock(return_value=1)
+mock_redis_instance.decr = AsyncMock(return_value=0)
+mock_redis_instance.expire = AsyncMock()
+mock_redis_instance.rpush = AsyncMock()
+mock_redis_instance.lpop = AsyncMock(return_value=None)
+mock_redis_instance.llen = AsyncMock(return_value=0)
+mock_redis_instance.hset = AsyncMock()
+mock_redis_instance.hget = AsyncMock(return_value=None)
+mock_redis_instance.pipeline = MagicMock()
+
+import src.utils.redis_client
+src.utils.redis_client.redis_client = mock_redis_instance
 
 from src.services.post_call_processor import PostCallContext
 from datetime import datetime
@@ -49,16 +66,17 @@ def make_post_call_context(sample_transcripts):
 
 @pytest.fixture
 def mock_redis():
-    redis = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.set = AsyncMock()
-    redis.incr = AsyncMock(return_value=1)
-    redis.decr = AsyncMock(return_value=0)
-    redis.expire = AsyncMock()
-    redis.rpush = AsyncMock()
-    redis.lpop = AsyncMock(return_value=None)
-    redis.llen = AsyncMock(return_value=0)
-    redis.hset = AsyncMock()
-    redis.hget = AsyncMock(return_value=None)
-    redis.pipeline = MagicMock()
-    return redis
+    mock_redis_instance.reset_mock()
+    mock_redis_instance.get.return_value = None
+    mock_redis_instance.set.return_value = None
+    mock_redis_instance.incr.return_value = 1
+    mock_redis_instance.decr.return_value = 0
+    mock_redis_instance.expire.return_value = None
+    mock_redis_instance.rpush.return_value = None
+    mock_redis_instance.lpop.return_value = None
+    mock_redis_instance.llen.return_value = 0
+    mock_redis_instance.hset.return_value = None
+    mock_redis_instance.hget.return_value = None
+    return mock_redis_instance
+
+

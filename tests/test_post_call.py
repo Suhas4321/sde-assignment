@@ -96,19 +96,44 @@ async def test_recording_blocks_processing(make_post_call_context):
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_freezes_dialler():
+async def test_circuit_breaker_proportional_backpressure():
     """
-    CURRENT BEHAVIOUR: When post-call LLM usage >= 90%, the circuit breaker
-    freezes ALL outbound dialling for the agent for 1800 seconds.
-    No gradual backpressure, no per-campaign granularity.
+    Test that PostCallCircuitBreaker returns the correct throttle multipliers
+    corresponding to different usage ratios.
     """
-    from src.services.circuit_breaker import PostCallCircuitBreaker
+    from src.services.circuit_breaker import circuit_breaker
+    from src.config import settings
 
-    breaker = PostCallCircuitBreaker()
-    breaker._capacity_threshold = 0.90
-    breaker._freeze_seconds = 1800
+    # Mock settings max_rpm = 100 to make math easy
+    with patch("src.services.circuit_breaker.settings") as mock_settings:
+        mock_settings.LLM_REQUESTS_PER_MINUTE = 100
 
-    # If we could mock Redis to return RPM at 91% of max,
-    # the breaker would trip and freeze ALL calls for that agent
-    assert breaker._freeze_seconds == 1800
-    assert breaker._capacity_threshold == 0.90
+        # Case 1: usage < 50% (e.g. 40 RPM) -> returns 1.0
+        with patch("src.services.circuit_breaker.redis_client.get", new_callable=AsyncMock) as mock_redis_get:
+            mock_redis_get.return_value = "40"
+            val = await circuit_breaker.check_capacity("agent-1")
+            assert val == 1.0
+
+        # Case 2: usage 50-70% (e.g. 60 RPM) -> returns 0.75
+        with patch("src.services.circuit_breaker.redis_client.get", new_callable=AsyncMock) as mock_redis_get:
+            mock_redis_get.return_value = "60"
+            val = await circuit_breaker.check_capacity("agent-1")
+            assert val == 0.75
+
+        # Case 3: usage 70-85% (e.g. 80 RPM) -> returns 0.50
+        with patch("src.services.circuit_breaker.redis_client.get", new_callable=AsyncMock) as mock_redis_get:
+            mock_redis_get.return_value = "80"
+            val = await circuit_breaker.check_capacity("agent-1")
+            assert val == 0.50
+
+        # Case 4: usage 85-95% (e.g. 90 RPM) -> returns 0.25
+        with patch("src.services.circuit_breaker.redis_client.get", new_callable=AsyncMock) as mock_redis_get:
+            mock_redis_get.return_value = "90"
+            val = await circuit_breaker.check_capacity("agent-1")
+            assert val == 0.25
+
+        # Case 5: usage >= 95% (e.g. 98 RPM) -> returns 0.05
+        with patch("src.services.circuit_breaker.redis_client.get", new_callable=AsyncMock) as mock_redis_get:
+            mock_redis_get.return_value = "98"
+            val = await circuit_breaker.check_capacity("agent-1")
+            assert val == 0.05

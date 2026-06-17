@@ -58,5 +58,12 @@ class Settings:
     POSTCALL_MAX_RETRIES: int = 3
     POSTCALL_RETRY_DELAY: int = 60  # Fixed delay — not exponential backoff
 
+    # ── Encryption ────────────────────────────────────────────────────────────
+    # Symmetric encryption key for transcripts/payloads at rest.
+    # Must be a 32-byte base64-encoded key.
+    ENCRYPTION_KEY: str = os.getenv(
+        "ENCRYPTION_KEY", "vRD62h5hKN9pMq512mb_k_4GCuc_GWjb74uXm8nboRA="
+    )
+
 
 settings = Settings()
