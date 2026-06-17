@@ -69,6 +69,13 @@ class Interaction(Base):
     retry_count = Column(Integer, default=0)
     error_log = Column(JSONB, default=list)
 
+    processing_priority = Column(String(50), default="cold", nullable=False)
+    llm_tokens_used = Column(Integer, default=0, nullable=False)
+    recording_status = Column(String(50), default="pending", nullable=False)
+    recording_attempts = Column(Integer, default=0, nullable=False)
+    processing_started_at = Column(DateTime(timezone=True), nullable=True)
+    processing_completed_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
