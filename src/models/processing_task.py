@@ -12,6 +12,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from src.models.base import Base
+from src.utils.encryption import EncryptedJSONB
 
 
 class TaskStatus(str, enum.Enum):
@@ -42,8 +43,8 @@ class ProcessingTask(Base):
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False, index=True)
     attempt_count = Column(Integer, default=0, nullable=False)
     max_attempts = Column(Integer, default=5, nullable=False)
-    payload = Column(JSONB, default=dict, nullable=False)
-    result = Column(JSONB, default=dict, nullable=False)
+    payload = Column(EncryptedJSONB, default=dict, nullable=False)
+    result = Column(EncryptedJSONB, default=dict, nullable=False)
     error_message = Column(Text, nullable=True)
     next_retry_at = Column(DateTime(timezone=True), nullable=True, index=True)
     started_at = Column(DateTime(timezone=True), nullable=True)

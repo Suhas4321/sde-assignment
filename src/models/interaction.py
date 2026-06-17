@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from src.models.base import Base
+from src.utils.encryption import EncryptedJSONB
 
 
 class InteractionStatus(str, enum.Enum):
@@ -52,9 +53,9 @@ class Interaction(Base):
     ended_at = Column(DateTime(timezone=True), nullable=True)
     duration_seconds = Column(Integer, nullable=True)
 
-    # The transcript is stored as JSONB inside conversation_data
+    # The transcript is stored as EncryptedJSONB inside conversation_data
     # conversation_data = {"transcript": [...], "summary": "...", ...}
-    conversation_data = Column(JSONB, default=dict)
+    conversation_data = Column(EncryptedJSONB, default=dict)
 
     # interaction_metadata stores extracted entities, analysis results,
     # and dashboard-facing fields. This is the "hot cache" the dashboard reads.
