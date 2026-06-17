@@ -34,134 +34,82 @@ but instead naturally dispatches fewer calls when LLM capacity is constrained?
 The capacity signal already exists — it just needs to be used differently.
 """
 
-import logging
-import time
-from dataclasses import dataclass
-from typing import Dict, Optional
+"""
+PostCallCircuitBreaker — Implements proportional backpressure to protect the LLM API.
 
+Instead of a binary freeze (which halts all agents cross-customer for 30 minutes),
+this service monitors current RPM and provides a gradual throttle multiplier (0.0 to 1.0)
+which the dialler can use to naturally slow down or speed up outbound calling.
+"""
+
+import logging
 from src.config import settings
 from src.utils.redis_client import redis_client
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class CircuitState:
-    agent_id: str
-    is_open: bool = False
-    opened_at: Optional[float] = None
-    freeze_until: Optional[float] = None
-    consecutive_failures: int = 0
-    # consecutive_failures is tracked but never used in trip logic.
-    # It was intended for a half-open state that never got implemented.
-
-
 class PostCallCircuitBreaker:
     """
-    Checks whether the dialler should be allowed to make a new call.
-    Called by the dialler before dispatching each outbound call.
-
-    The Redis key `llm:postcall:rpm` is the shared state between this
-    circuit breaker and the post-call workers. Workers increment it when
-    they start an LLM request. The TTL of 60 seconds means it naturally
-    decays — but if workers crash mid-request, they may not decrement it,
-    causing the counter to be permanently inflated until TTL expires.
+    Tracks and checks LLM capacity usage to recommend a dialling rate.
     """
 
-    def __init__(self):
-        self._states: Dict[str, CircuitState] = {}
-        self._capacity_threshold = settings.CIRCUIT_BREAKER_CAPACITY_THRESHOLD
-        self._freeze_seconds = settings.CIRCUIT_BREAKER_FREEZE_SECONDS
-
-    async def check_capacity(self, agent_id: str) -> bool:
+    async def check_capacity(self, agent_id: str) -> float:
         """
-        Returns True if the agent is allowed to make a new call.
-
-        Called by the dialler. NOT called by the post-call workers —
-        they fire LLM requests unconditionally.
+        Returns a capacity multiplier float (0.0 to 1.0) indicating recommended dialling speed:
+        - usage < 50%  -> 1.0 (Full speed)
+        - usage 50-70% -> 0.75 (75% speed)
+        - usage 70-85% -> 0.50 (50% speed)
+        - usage 85-95% -> 0.25 (25% speed)
+        - usage >= 95% -> 0.05 (5% speed, never completely freezes)
         """
-        state = self._states.get(agent_id)
+        try:
+            current_rpm = int(await redis_client.get("llm:postcall:rpm") or 0)
+        except Exception as e:
+            logger.warning(f"Failed to fetch postcall RPM from Redis: {e}")
+            return 1.0
 
-        if state and state.is_open:
-            if time.time() < state.freeze_until:
-                logger.warning(
-                    "circuit_breaker_open",
-                    extra={
-                        "agent_id": agent_id,
-                        "freeze_remaining_s": round(state.freeze_until - time.time()),
-                    },
-                )
-                return False
-            # Freeze expired — reset without checking whether the underlying
-            # cause (LLM overload) has actually resolved.
-            state.is_open = False
-            state.consecutive_failures = 0
-            logger.info("circuit_breaker_closed", extra={"agent_id": agent_id})
-
-        current_rpm = int(await redis_client.get("llm:postcall:rpm") or 0)
         max_rpm = settings.LLM_REQUESTS_PER_MINUTE
-
-        # This is requests-per-minute, not tokens-per-minute.
-        # A campaign with long transcripts will hit the token limit first,
-        # but this check won't see it until RPM also spikes.
         usage_ratio = current_rpm / max_rpm if max_rpm > 0 else 0
 
-        if usage_ratio >= self._capacity_threshold:
-            self._trip(agent_id)
-            return False
+        if usage_ratio < 0.50:
+            return 1.0
+        elif usage_ratio < 0.70:
+            return 0.75
+        elif usage_ratio < 0.85:
+            return 0.50
+        elif usage_ratio < 0.95:
+            return 0.25
+        else:
+            logger.warning(
+                "ALERT: Extreme LLM capacity constraint. Proportional backpressure active.",
+                extra={
+                    "agent_id": agent_id,
+                    "usage_ratio": round(usage_ratio, 2),
+                    "current_rpm": current_rpm,
+                }
+            )
+            return 0.05
 
-        return True
-
-    def _trip(self, agent_id: str):
-        """
-        Open the circuit breaker for agent_id for CIRCUIT_BREAKER_FREEZE_SECONDS.
-
-        Logs an error but provides no context about WHY it tripped — the on-call
-        engineer sees "circuit_breaker_tripped" and has to go dig in Redis to
-        figure out whether it was LLM quota, a Celery backlog, or a Redis glitch.
-        """
-        now = time.time()
-        state = CircuitState(
-            agent_id=agent_id,
-            is_open=True,
-            opened_at=now,
-            freeze_until=now + self._freeze_seconds,
-        )
-        self._states[agent_id] = state
-
-        logger.error(
-            "circuit_breaker_tripped",
-            extra={
-                "agent_id": agent_id,
-                "freeze_seconds": self._freeze_seconds,
-                "capacity_threshold": self._capacity_threshold,
-                # Would be useful to also log: current_rpm, current_tpm,
-                # queue_depth, and which customer's calls triggered the spike.
-                # None of that is available here.
-            },
-        )
-
-    async def record_postcall_start(self):
+    async def record_postcall_start(self) -> None:
         """
         Increment the RPM counter when a post-call LLM request starts.
-
-        This runs AFTER we've decided to fire the request, so it's a
-        measurement, not a gate. The dialler reads this counter to make
-        dispatch decisions — there's a lag between when requests go out
-        and when the counter updates.
         """
-        await redis_client.incr("llm:postcall:rpm")
-        await redis_client.expire("llm:postcall:rpm", 60)
+        try:
+            await redis_client.incr("llm:postcall:rpm")
+            await redis_client.expire("llm:postcall:rpm", 60)
+        except Exception as e:
+            logger.warning(f"Failed to increment postcall RPM in Redis: {e}")
 
-    async def record_postcall_end(self):
+    async def record_postcall_end(self) -> None:
         """
         Decrement the RPM counter when the LLM request completes.
-
-        If the worker crashes between start and end, the counter stays
-        inflated until the 60-second TTL expires. During that window,
-        the circuit breaker may trip unnecessarily.
         """
-        await redis_client.decr("llm:postcall:rpm")
+        try:
+            await redis_client.decr("llm:postcall:rpm")
+        except Exception as e:
+            logger.warning(f"Failed to decrement postcall RPM in Redis: {e}")
 
 
 circuit_breaker = PostCallCircuitBreaker()
+
