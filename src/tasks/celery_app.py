@@ -18,4 +18,10 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_default_queue=settings.POSTCALL_CELERY_QUEUE,
+    beat_schedule={
+        "reset-stuck-tasks-every-60-seconds": {
+            "task": "reset_stuck_tasks_periodic",
+            "schedule": 60.0,
+        }
+    }
 )
