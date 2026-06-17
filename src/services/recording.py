@@ -46,49 +46,73 @@ async def fetch_and_upload_recording(
     """
     Attempt to fetch the Exotel recording and upload it to S3.
 
-    Current implementation: sleep 45s, try once, return None on failure.
-    Failure is logged at DEBUG level — effectively invisible in production
-    where the log level is INFO.
-
+    Uses exponential backoff retry loop to handle delayed recording availability.
     Returns the S3 key on success, None on failure or timeout.
     """
+    backoff_schedule = [5, 10, 20, 40, 60, 60]
+    max_attempts = len(backoff_schedule) + 1
 
-    # This sleep blocks the entire Celery task. While we're sleeping here,
-    # the LLM quota is sitting idle, the analysis hasn't started, and the
-    # dashboard still shows "processing" for what might be a confirmed rebook
-    # that the sales team is waiting to act on.
-    await asyncio.sleep(settings.RECORDING_WAIT_SECONDS)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            recording_url = await _fetch_exotel_recording_url(call_sid, exotel_account_id)
 
-    try:
-        recording_url = await _fetch_exotel_recording_url(call_sid, exotel_account_id)
+            if recording_url:
+                s3_key = await _upload_to_s3(recording_url, interaction_id)
+                logger.info(
+                    "recording_success",
+                    extra={
+                        "interaction_id": interaction_id,
+                        "call_sid": call_sid,
+                        "attempt": attempt,
+                        "s3_key": s3_key,
+                    }
+                )
+                return s3_key
 
-        if not recording_url:
-            # Not available after 45s. We move on. No record that we tried.
-            # An ops engineer investigating "why is there no recording for
-            # interaction X?" has no log entry to find.
-            logger.debug(
-                "recording_not_available",
+            # None returned means 404 (not ready yet)
+            logger.info(
+                "recording_attempt_failed",
                 extra={
                     "interaction_id": interaction_id,
                     "call_sid": call_sid,
-                    "waited_seconds": settings.RECORDING_WAIT_SECONDS,
-                },
+                    "attempt": attempt,
+                    "status": "not_ready",
+                }
             )
-            return None
 
-        s3_key = await _upload_to_s3(recording_url, interaction_id)
-        return s3_key
+        except Exception as e:
+            # Connection error, HTTP status error, S3 upload error, etc.
+            logger.warning(
+                "recording_attempt_error",
+                extra={
+                    "interaction_id": interaction_id,
+                    "call_sid": call_sid,
+                    "attempt": attempt,
+                    "error": str(e),
+                }
+            )
 
-    except Exception as e:
-        # Exception is caught here and swallowed. The caller (Celery task)
-        # doesn't know whether this succeeded, failed, or was skipped.
-        # It logs at ERROR level, which is at least visible — but there's
-        # no retry path and no way to replay just the recording upload later.
-        logger.exception(
-            "recording_upload_error",
-            extra={"interaction_id": interaction_id, "error": str(e)},
-        )
-        return None
+        if attempt < max_attempts:
+            wait_seconds = backoff_schedule[attempt - 1]
+            logger.info(
+                "recording_retry_waiting",
+                extra={
+                    "interaction_id": interaction_id,
+                    "attempt": attempt,
+                    "wait_seconds": wait_seconds,
+                }
+            )
+            await asyncio.sleep(wait_seconds)
+
+    logger.error(
+        "recording_failed_permanently",
+        extra={
+            "interaction_id": interaction_id,
+            "call_sid": call_sid,
+            "total_attempts": max_attempts,
+        }
+    )
+    return None
 
 
 async def _fetch_exotel_recording_url(
@@ -97,22 +121,20 @@ async def _fetch_exotel_recording_url(
     """
     Hit the Exotel API to get the recording URL for a completed call.
 
-    Returns the recording URL if available, None if not yet ready.
-    The 404 case (not yet ready) and the genuine error case (call had no
-    recording, e.g., call was never connected) look the same from here —
-    both return None. A retry loop would want to handle these differently.
+    Returns the recording URL if available, None if not yet ready (404 status).
+    Raises httpx.HTTPError for general errors or raise_for_status for other statuses.
     """
     url = f"https://api.exotel.com/v1/Accounts/{account_id}/Calls/{call_sid}/Recording"
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("recording_url")
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("recording_url")
+        elif resp.status_code == 404:
             return None
-    except httpx.HTTPError:
-        return None
+        else:
+            resp.raise_for_status()
 
 
 async def _upload_to_s3(recording_url: str, interaction_id: str) -> str:
