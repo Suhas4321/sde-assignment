@@ -44,7 +44,7 @@ class Interaction(Base):
     agent_id = Column(UUID(as_uuid=True), nullable=False, index=True)
 
     status = Column(
-        Enum(InteractionStatus), default=InteractionStatus.INITIATED, nullable=False
+        Enum(InteractionStatus, native_enum=False), default=InteractionStatus.INITIATED, nullable=False
     )
     call_sid = Column(String(255), nullable=True, index=True)
     call_provider = Column(String(50), default="exotel")
