@@ -39,8 +39,8 @@ class ProcessingTask(Base):
     customer_id = Column(UUID(as_uuid=True), nullable=False)
     campaign_id = Column(UUID(as_uuid=True), nullable=False)
     task_type = Column(String(100), nullable=False)  # "llm_analysis", "recording_upload", "signal_jobs", "lead_update"
-    priority = Column(Enum(TaskPriority, name="task_priority"), default=TaskPriority.COLD, nullable=False)
-    status = Column(Enum(TaskStatus, name="task_status"), default=TaskStatus.PENDING, nullable=False, index=True)
+    priority = Column(Enum(TaskPriority, name="task_priority", values_callable=lambda x: [e.value for e in x]), default=TaskPriority.COLD, nullable=False)
+    status = Column(Enum(TaskStatus, name="task_status", values_callable=lambda x: [e.value for e in x]), default=TaskStatus.PENDING, nullable=False, index=True)
     attempt_count = Column(Integer, default=0, nullable=False)
     max_attempts = Column(Integer, default=5, nullable=False)
     payload = Column(EncryptedJSONB, default=dict, nullable=False)
