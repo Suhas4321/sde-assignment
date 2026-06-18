@@ -20,3 +20,9 @@ node_modules/
 .idea/
 .vscode/
 .claude/
+
+# Personal study and explanation files
+1_CODEBASE_EXPLANATION.md
+2_PROBLEMS_AND_SOLUTIONS.md
+3_TASK_BREAKDOWN.md
+SOLUTIONS_EXPLANATION.md
