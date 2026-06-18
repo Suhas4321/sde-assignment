@@ -75,16 +75,7 @@ async def end_interaction(
             )
             raise HTTPException(status_code=404, detail="Interaction not found")
 
-        # 2. Update status in database
-        await _update_interaction_status(
-            interaction_id=str(interaction_id),
-            status="ENDED",
-            ended_at=datetime.utcnow(),
-            duration=request.duration_seconds,
-            call_sid=request.call_sid,
-        )
-
-        # 3. Classify Priority
+        # 2. Classify Priority
         transcript = interaction.conversation_data.get("transcript", []) if interaction.conversation_data else []
         is_short = len(transcript) < 4
         
@@ -96,12 +87,17 @@ async def end_interaction(
         transcript_text = interaction.transcript_text
         priority = "skip" if is_short else classify_priority(transcript_text, custom_keywords=hot_keywords)
 
-        # 4. Save updates to interaction table in DB
+        # 3. Update status, priority, and recording status in a single atomic transaction
         async with async_session_factory() as session:
             stmt = (
                 update(Interaction)
                 .where(Interaction.id == interaction_id)
                 .values(
+                    status="ENDED",
+                    ended_at=datetime.utcnow(),
+                    duration_seconds=request.duration_seconds,
+                    call_sid=request.call_sid,
+                    updated_at=datetime.utcnow(),
                     processing_priority=priority,
                     recording_status="pending",
                     processing_started_at=datetime.utcnow(),
@@ -205,30 +201,4 @@ async def _load_interaction(interaction_id: UUID) -> Optional[Interaction]:
         return None
 
 
-async def _update_interaction_status(
-    interaction_id: str,
-    status: str,
-    ended_at: datetime,
-    duration: Optional[int],
-    call_sid: Optional[str],
-) -> None:
-    """
-    Update interaction status in the database.
-    """
-    try:
-        async with async_session_factory() as session:
-            stmt = (
-                update(Interaction)
-                .where(Interaction.id == UUID(interaction_id))
-                .values(
-                    status=status,
-                    ended_at=ended_at,
-                    duration_seconds=duration,
-                    call_sid=call_sid,
-                    updated_at=datetime.utcnow()
-                )
-            )
-            await session.execute(stmt)
-            await session.commit()
-    except Exception as e:
-        logger.error(f"Failed to update interaction status in DB: {e}")
+

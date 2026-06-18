@@ -192,6 +192,26 @@ class RedisTokenBucketLimiter(AbstractRateLimiter):
             logger.exception("redis_rate_limiter_error", extra={"error": str(e)})
             return True
 
+    # Lua script to atomically refund overestimated tokens back to the TPM bucket
+    LUA_RELEASE = """
+    local key_tpm_tokens = KEYS[1]
+    local key_tpm_last = KEYS[2]
+
+    local refund = tonumber(ARGV[1])
+    local tpm_capacity = tonumber(ARGV[2])
+    local tpm_refill = tonumber(ARGV[3])
+    local now = tonumber(ARGV[4])
+
+    local tpm_tokens = tonumber(redis.call('get', key_tpm_tokens) or tpm_capacity)
+    local tpm_last = tonumber(redis.call('get', key_tpm_last) or now)
+    local elapsed = math.max(0, now - tpm_last)
+    local current_tpm = math.min(tpm_capacity, tpm_tokens + (elapsed * tpm_refill) + refund)
+
+    redis.call('set', key_tpm_tokens, current_tpm)
+    redis.call('set', key_tpm_last, now)
+    return 1
+    """
+
     async def release(self, estimated_tokens: int, actual_tokens: int) -> None:
         refund = estimated_tokens - actual_tokens
         if refund <= 0:
@@ -199,15 +219,16 @@ class RedisTokenBucketLimiter(AbstractRateLimiter):
 
         now = time.time()
         try:
-            # Safely refund overestimated tokens inside the bucket
-            tpm_tokens = float(await self.redis.get(self.key_tpm_tokens) or self.tpm_capacity)
-            tpm_last = float(await self.redis.get(self.key_tpm_last) or now)
-            
-            elapsed = max(0.0, now - tpm_last)
-            current_tpm = min(self.tpm_capacity, tpm_tokens + (elapsed * self.tpm_refill_rate) + refund)
-            
-            await self.redis.set(self.key_tpm_tokens, current_tpm)
-            await self.redis.set(self.key_tpm_last, now)
+            await self.redis.eval(
+                self.LUA_RELEASE,
+                2,
+                self.key_tpm_tokens,
+                self.key_tpm_last,
+                refund,
+                self.tpm_capacity,
+                self.tpm_refill_rate,
+                now,
+            )
         except Exception as e:
             logger.exception("redis_rate_limiter_release_error", extra={"error": str(e)})
 

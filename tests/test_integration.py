@@ -38,7 +38,6 @@ async def test_endpoint_triggers_both_decoupled_tasks(api_client):
 
     # Patch database calls, Celery dispatches, and audit logger
     with patch("src.api.endpoints._load_interaction", new_callable=AsyncMock) as mock_load, \
-         patch("src.api.endpoints._update_interaction_status", new_callable=AsyncMock) as mock_status_update, \
          patch("src.api.endpoints.async_session_factory") as mock_session_factory, \
          patch("src.api.endpoints.task_manager.create_task", new_callable=AsyncMock) as mock_create_task, \
          patch("src.api.endpoints.process_recording_upload_task.apply_async") as mock_celery_rec, \
@@ -200,8 +199,8 @@ async def test_llm_task_retry_on_rate_limit():
         # Simulate budget exhaustion
         mock_budget.check_and_reserve_budget = AsyncMock(return_value=(False, "exhausted"))
 
-        from src.tasks.celery_tasks import _process_llm_analysis
-        with pytest.raises(Exception, match="budget_exhausted"):
+        from src.tasks.celery_tasks import _process_llm_analysis, BudgetExhausted
+        with pytest.raises(BudgetExhausted):
             await _process_llm_analysis(None, task_id)
 
         # Verify task reverted to PENDING status in DB

@@ -27,6 +27,16 @@ from sqlalchemy import select, update
 logger = logging.getLogger(__name__)
 
 
+class RateLimitExceeded(Exception):
+    """Raised when the global LLM rate limit is exhausted."""
+    pass
+
+
+class BudgetExhausted(Exception):
+    """Raised when a customer's token budget (and shared pool) is exhausted."""
+    pass
+
+
 @celery_app.task(
     name="process_recording_upload_task",
     bind=True,
@@ -143,7 +153,7 @@ async def _process_recording_upload(task, task_id: str):
                 campaign_id=campaign_id,
                 attempt=pt.attempt_count + 1,
             )
-            await task_manager.complete_task(task_id, {"status": "failed"})
+            await task_manager.fail_task(task_id, "Recording permanently failed after all retries")
 
 
 @celery_app.task(
@@ -164,7 +174,7 @@ def process_llm_analysis_task(self, task_id: str):
         loop.run_until_complete(_process_llm_analysis(self, task_id))
     except Exception as e:
         logger.exception("llm_task_failed", extra={"task_id": task_id, "error": str(e)})
-        if "rate_limit_exceeded" in str(e) or "budget_exhausted" in str(e):
+        if isinstance(e, (RateLimitExceeded, BudgetExhausted)):
             raise self.retry(exc=e, countdown=5)
         loop.run_until_complete(task_manager.fail_task(task_id, str(e)))
         raise self.retry(exc=e)
@@ -250,7 +260,7 @@ async def _process_llm_analysis(task, task_id: str):
             campaign_id=campaign_id,
             metadata={"reason": "customer_budget_exhausted"}
         )
-        raise Exception("budget_exhausted")
+        raise BudgetExhausted(f"Customer {customer_id} budget exhausted")
 
     # Check Global Rate Limiter
     global_ok = await global_rate_limiter.acquire(estimated_tokens)
@@ -274,7 +284,7 @@ async def _process_llm_analysis(task, task_id: str):
             campaign_id=campaign_id,
             metadata={"reason": "global_rate_limit_exceeded"}
         )
-        raise Exception("rate_limit_exceeded")
+        raise RateLimitExceeded("Global LLM rate limit exceeded")
 
     # 5. Perform LLM analysis
     ctx = PostCallContext(
